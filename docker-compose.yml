@@ -1,0 +1,40 @@
+services:
+  monitor:
+    build: .
+    environment:
+      - GPU_NAME=${GPU_NAME:-RTX 4070}
+      - MAPBOX_API_ACCESS_TOKEN=${MAPBOX_API_ACCESS_TOKEN:-pk.eyJ1IjoidWNmLW1hcGJveCIsImEiOiJja3RpeXhkaXcxNzJtMnZxbmtkcnJuM3BkIn0.kGmGlkbuWaCBf7_RrZXULg}
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+    volumes:
+      - ./config:/app/config
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./train:/app/train
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+      - /usr/lib/x86_64-linux-gnu/libcuda.so.1:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:ro
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidia1:/dev/nvidia1
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+    ports:
+      - "8501:8501"
+    # Uncomment deploy section below once nvidia-container-toolkit is installed,
+    # and remove the manual devices/volumes mounts above.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    entrypoint: ["bash"]
+    stdin_open: true
+    tty: true
