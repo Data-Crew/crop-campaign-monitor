@@ -8,6 +8,9 @@ data/output/
 # GeoJSON parcels by tile/fragment (uncomment if you don’t version sample fields)
 data/fields/
 
+# CDL raster
+data/cdl/*.tif
+
 # ── Python ─────────────────────────────────────────
 __pycache__/
 *.py[cod]
