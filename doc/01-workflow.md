@@ -26,19 +26,23 @@ profile for its crop type.
              ├──────────────────────────────┐
              ▼                              ▼
     ┌─────────────────────┐     ┌───────────────────────┐
-    │  Phase 2: Training  │     │  Phase 3: Monitor     │
-    │  prepare → finetune │     │  embed → profile →    │
-    │  → export_encoder   │     │  score → report       │
-    └────────┬────────────┘     └───────────┬───────────┘
+    │  Phase 2: Training  │     │  Phase 3: Monitor          │
+    │  prepare → finetune │     │  embed → profile →         │
+    │  → export_encoder   │     │  score → report → index    │
+    └────────┬────────────┘     └───────────┬────────────────┘
              │  clay-crop-encoder.ckpt      │
              └──────────────────────────────┘
                                             │
                                   parcel_scores.geojson
                                   campaign_report.json
+                                  parcels.faiss
+                                  parcels_index_meta.parquet
                                             │
                                      ┌──────▼──────┐
                                      │  Streamlit  │
                                      │  Dashboard  │
+                                     │  + Similar  │
+                                     │    Parcels  │
                                      └─────────────┘
 ```
 
@@ -602,3 +606,215 @@ summary consumed by the Streamlit dashboard.
 
 This JSON powers the Streamlit dashboard's summary cards, per-crop
 tables, and worst-parcel alerts.
+
+---
+
+### Step 8 — Index (`src/index.py`)
+
+**What it does:** builds a **FAISS similarity index** over all parcel
+seasonal embeddings, enabling fast nearest-neighbour search across
+thousands of parcels.  The index is used by the dashboard's **Similar
+Parcels** panel and by the `src/query.py` CLI.
+
+#### Why a similarity index?
+
+The scoring step (Step 6) compares each parcel against a **crop
+reference profile** — "is this corn parcel behaving like typical corn?"
+The index asks a different question: **"which other parcels in the
+campaign look most like this one?"**  This enables:
+
+- **Anomaly confirmation:** if a RED parcel's nearest neighbours are
+  also RED, the signal is likely real.  If neighbours are all GREEN, the
+  alert may be noise.
+- **Rotation / mislabel detection:** if a parcel labelled *corn* has
+  nearest neighbours that are mostly *soybeans*, the label may be
+  wrong or the field may have rotated since the CDL year.
+- **Unknown crops:** parcels with no crop label (GRAY) can be
+  characterised by what their neighbours are.
+
+#### Algorithm
+
+For each parcel that has at least one dated embedding under
+`data/embeddings/<parcel_id>/`:
+
+1. Load all `*.npy` files for that parcel.
+2. Compute the **temporal mean** of all dated vectors → one
+   768-dimensional seasonal vector per parcel.
+3. **L2-normalise** the vector so that inner product equals cosine
+   similarity.
+4. Collect all normalised vectors into a matrix `(N, 768)`.
+5. Build `faiss.IndexFlatIP(768)` (exact inner-product search).
+6. Add all vectors in the same row order as the metadata table.
+
+```
+data/embeddings/
+  P001/
+    2024-04-10.npy  ─┐
+    2024-04-25.npy   │ mean → v̄  → L2-norm → row i in FAISS
+    2024-05-05.npy  ─┘
+
+  P002/
+    2024-04-10.npy  ─┐
+    2024-04-25.npy   │ mean → v̄  → L2-norm → row i+1 in FAISS
+    ...             ─┘
+```
+
+**FAISS and cosine similarity:**  IndexFlatIP computes the inner product
+between vectors.  When all vectors are unit-length (L2-normalised),
+inner product equals cosine similarity:
+
+```
+similarity = v̂_query · v̂_neighbor   (both L2-normalised)
+           = cos(θ)                  (angle between them)
+
+  1.00 → identical direction (same crop, same condition)
+  0.90 → very similar
+  0.70 → related but distinct
+  0.00 → orthogonal (unrelated)
+```
+
+**Cosine distance** is then `1 − similarity`, consistent with Step 6's
+health score metric.
+
+#### Fallback — FAISS not installed
+
+If `faiss-cpu` is not available, the step writes
+`data/output/parcels_vectors.npz` (the raw normalised matrix) instead
+of a `.faiss` file.  The query module detects this automatically and
+falls back to brute-force matrix multiplication for search.
+
+**Output:**
+
+| File | Role |
+|------|------|
+| `data/output/parcels.faiss` | Binary FAISS index (`faiss.write_index`) |
+| `data/output/parcels_index_meta.parquet` | Row-aligned metadata — one row per indexed parcel, in FAISS order |
+| `data/output/parcels_vectors.npz` | Fallback: normalised vectors when FAISS is unavailable |
+
+**Schema — `parcels_index_meta.parquet`:**
+
+| column | type | description |
+|--------|------|-------------|
+| `parcel_id` | string | Parcel identifier |
+| `crop_name` | string / null | Crop label from `parcels_labeled.parquet` |
+| `geometry` | geometry | Parcel polygon (same CRS as `parcel_scores.parquet`) |
+| `centroid_lat` | float | Latitude |
+| `centroid_lon` | float | Longitude |
+| `status` | string | Traffic-light status at time of indexing |
+| `faiss_row` | int | Row index in the FAISS index (for debugging) |
+
+FAISS row `i` always corresponds to metadata row `i`.  Parcels with no
+embeddings are **excluded** from both files.
+
+**CLI:**
+
+```bash
+python -m src.index --config config/default.yaml
+# overrides follow the same key=value pattern as other steps:
+python -m src.index --config config/default.yaml output.dir=data/output
+```
+
+---
+
+### Step 9 — Query (`src/query.py`)
+
+**What it does:** loads the FAISS index and provides two query modes:
+
+1. **Nearest-neighbour lookup** — given a `parcel_id`, return the *k*
+   most similar parcels in the campaign.
+2. **Crop mislabel / rotation scan** — given a `crop_name`, find
+   parcels labelled as that crop whose neighbours are predominantly a
+   *different* crop.
+
+#### Nearest-neighbour lookup
+
+```
+query parcel P-0042  →  seasonal mean embedding  →  L2-normalise
+                                                        │
+                                               FAISS.search(k+1)
+                                                        │
+                                           drop self  ──┤
+                                                        │
+                        [P-0107  soybeans  sim=0.97  dist=0.03]
+                        [P-0831  soybeans  sim=0.96  dist=0.04]
+                        [P-1204  corn      sim=0.91  dist=0.09]  ← different crop
+                        [P-0558  soybeans  sim=0.89  dist=0.11]
+                        ...
+```
+
+Each result exposes both **similarity** (inner product, 0–1) and
+**cosine distance** (`1 − similarity`), consistent with Step 6's
+health score metric.
+
+**CLI:**
+
+```bash
+python -m src.query --parcel-id P-0042 --k 10
+```
+
+**Example output (JSON):**
+
+```json
+[
+  { "parcel_id": "P-0107", "crop_name": "soybeans", "similarity": 0.974, "cosine_distance": 0.026 },
+  { "parcel_id": "P-0831", "crop_name": "soybeans", "similarity": 0.963, "cosine_distance": 0.037 },
+  { "parcel_id": "P-1204", "crop_name": "corn",     "similarity": 0.911, "cosine_distance": 0.089 },
+  { "parcel_id": "P-0558", "crop_name": "soybeans", "similarity": 0.892, "cosine_distance": 0.108 }
+]
+```
+
+#### Crop mislabel / rotation scan
+
+```bash
+python -m src.query --crop-name corn --k 10 --min-neighbor-diff-frac 0.6
+```
+
+For every parcel labelled *corn*, the scan:
+
+1. Retrieves its *k* nearest neighbours (excluding self).
+2. Counts how many neighbours have a **different** crop label (ignoring
+   GRAY / unlabelled neighbours).
+3. Computes `diff_fraction = different_crop_neighbors / labeled_neighbors`.
+4. Returns parcels where `diff_fraction ≥ min_neighbor_diff_frac`,
+   sorted descending.
+
+**Interpretation:**
+
+| `diff_fraction` | Interpretation |
+|----------------|---------------|
+| 1.0 | All *k* neighbours are non-corn — strong mislabel / rotation signal |
+| 0.7–0.9 | Probable mislabel or mid-season crop rotation |
+| 0.5–0.7 | Borderline — worth manual review |
+| < 0.5 | Within normal variation, less suspicious |
+
+**Example output:**
+
+```json
+[
+  { "parcel_id": "P-0392", "neighbor_diff_fraction": 1.0, "diff_neighbors": 10, "labeled_neighbors": 10 },
+  { "parcel_id": "P-1047", "neighbor_diff_fraction": 0.8, "diff_neighbors": 8,  "labeled_neighbors": 10 },
+  { "parcel_id": "P-0215", "neighbor_diff_fraction": 0.7, "diff_neighbors": 7,  "labeled_neighbors": 10 }
+]
+```
+
+#### Output dir resolution
+
+`src/query.py` does **not** require a config file; it defaults to
+`data/output/` for index files.  Pass `--config` to derive the path
+from a YAML config, or `--output-dir` to point to a custom directory.
+
+---
+
+## Pipeline summary — all outputs
+
+| Step | Module | Key output |
+|------|--------|-----------|
+| 1 — Ingest | `src/ingest.py` | `parcels_labeled.parquet` |
+| 2 — Fetch | `src/fetch.py` | `tile_index.parquet` |
+| 3 — Chip | `src/chip.py` | `data/chips/<pid>/<date>.npz` |
+| 4 — Embed | `src/embed.py` | `data/embeddings/<pid>/<date>.npy` |
+| 5 — Profile | `src/profile.py` | `reference_profiles.pkl` |
+| 6 — Score | `src/score.py` | `parcel_scores.parquet`, `.geojson` |
+| 7 — Report | `src/report.py` | `campaign_report.json` |
+| 8 — Index | `src/index.py` | `parcels.faiss`, `parcels_index_meta.parquet` |
+| 9 — Query | `src/query.py` | CLI / importable API (no file output) |
