@@ -29,5 +29,6 @@ case $STEP in
   profile)  python -m src.profile --config "$CONFIG" "${OVERRIDES[@]}" ;;
   score)    python -m src.score --config "$CONFIG" "${OVERRIDES[@]}" ;;
   report)   python -m src.report --config "$CONFIG" "${OVERRIDES[@]}" ;;
+  index)    python -m src.index --config "$CONFIG" "${OVERRIDES[@]}" ;;
   *)        echo "Unknown step: $STEP"; exit 1 ;;
 esac

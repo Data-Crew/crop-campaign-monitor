@@ -435,6 +435,47 @@ def _render_kepler_map(
         st.warning(f"Kepler.gl rendering error: {exc}")
 
 
+def _render_kepler_map_similarity(
+    gdf: gpd.GeoDataFrame,
+    height: int = 360,
+    zoom: int = 12,
+) -> None:
+    """Kepler mini-map for query parcel vs neighbors (color by map_role)."""
+    try:
+        from keplergl import KeplerGl
+        from streamlit_keplergl import keplergl_static
+
+        gdf_wgs = gdf.to_crs(epsg=4326) if gdf.crs and gdf.crs.to_epsg() != 4326 else gdf
+
+        config = _load_kepler_config("kepler_similarity_config.json")
+        bounds = gdf_wgs.total_bounds
+        config["config"]["mapState"]["latitude"] = float((bounds[1] + bounds[3]) / 2)
+        config["config"]["mapState"]["longitude"] = float((bounds[0] + bounds[2]) / 2)
+        config["config"]["mapState"]["zoom"] = zoom
+
+        kmap = KeplerGl(height=height, config=config)
+        kmap.add_data(data=gdf_wgs, name="parcels")
+        keplergl_static(kmap, center_map=True)
+    except ImportError:
+        st.warning(
+            "Kepler.gl not available. Install `keplergl` and `streamlit-keplergl` "
+            "for interactive maps."
+        )
+    except Exception as exc:
+        st.warning(f"Kepler.gl rendering error: {exc}")
+
+
+@st.cache_resource(show_spinner=False)
+def _parcel_similarity_index(_meta_mtime: float) -> Any:
+    """Load FAISS-backed index; None if files missing or unloadable."""
+    from src.query import load_parcel_index
+
+    try:
+        return load_parcel_index(output_dir=OUTPUT_DIR)
+    except FileNotFoundError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Sidebar — configuration only
 # ---------------------------------------------------------------------------
@@ -525,6 +566,9 @@ def sidebar() -> dict[str, Any]:
             "parcel_scores.parquet",
             "campaign_report.json",
             "scoring_thresholds.json",
+            "parcels.faiss",
+            "parcels_index_meta.parquet",
+            "parcels_vectors.npz",
         ]
         if also_clear_labeled:
             files_to_clear.append("parcels_labeled.parquet")
@@ -713,16 +757,17 @@ def tab_scripting(ctx: dict[str, Any]) -> None:
             st.warning("No trained encoder \u2014 will use mock embeddings")
 
         mo_steps = {
-            "All (embed+profile+score+report)": "Run the full monitor pipeline.",
+            "All (embed+profile+score+report+index)": "Run the full monitor pipeline.",
             "1-Embed": "Produce 768-dim embeddings from chips (GPU).",
             "2-Profile": "Build reference trajectory per crop type.",
             "3-Score": "Cosine distance against crop reference profile.",
             "4-Report": "Generate scored GeoJSON, CSV, and campaign report.",
+            "5-Index": "Build FAISS similarity index (cosine neighbors on seasonal embeddings).",
         }
 
         labeled_exists = (OUTPUT_DIR / "parcels_labeled.parquet").exists()
         steps_needing_labeled = {
-            "All (embed+profile+score+report)", "2-Profile", "3-Score", "4-Report",
+            "All (embed+profile+score+report+index)", "2-Profile", "3-Score", "4-Report", "5-Index",
         }
 
         c_sel, c_run, c_step = st.columns([2, 1, 1])
@@ -737,7 +782,7 @@ def tab_scripting(ctx: dict[str, Any]) -> None:
                     _enqueue_run(
                         f"{gpu_env} bash scripts/run_monitor.sh config/monitor.yaml "
                         f"{overrides} {scoring_overrides}",
-                        "Monitor", phase="mo",
+                        "Monitor (embed+profile+score+report+index)", phase="mo",
                     )
         with c_step:
             if st.button("Run Step", key="mo_run_step", use_container_width=True):
@@ -745,7 +790,7 @@ def tab_scripting(ctx: dict[str, Any]) -> None:
                     st.error("**parcels_labeled.parquet** missing \u2014 run Phase 1 \u2192 Ingest first.")
                 else:
                     mo_map = {
-                        "All (embed+profile+score+report)": (
+                        "All (embed+profile+score+report+index)": (
                             f"{gpu_env} bash scripts/run_monitor.sh config/monitor.yaml "
                             f"{overrides} {scoring_overrides}"
                         ),
@@ -756,6 +801,7 @@ def tab_scripting(ctx: dict[str, Any]) -> None:
                             f"{overrides} {scoring_overrides}"
                         ),
                         "4-Report": f"{gpu_env} bash scripts/run_step.sh report config/monitor.yaml {overrides}",
+                        "5-Index": f"{gpu_env} bash scripts/run_step.sh index config/monitor.yaml {overrides}",
                     }
                     _enqueue_run(mo_map[mo_step], f"Monitor \u2192 {mo_step}", phase="mo")
         st.caption(mo_steps[mo_step])
@@ -906,6 +952,99 @@ def tab_parcel_detail(ctx: dict[str, Any]) -> None:
 
     parcel_gdf = scored[scored["parcel_id"] == selected_pid]
     _render_kepler_map(parcel_gdf, "kepler_monitor_config.json", zoom=14)
+
+    st.subheader("Similar Parcels")
+    meta_sim = OUTPUT_DIR / "parcels_index_meta.parquet"
+    if not meta_sim.exists():
+        st.info(
+            "Similarity index not built. Run Phase 3 \u2192 **5-Index** or **Run All** in the monitor section."
+        )
+    else:
+        idx = _parcel_similarity_index(meta_sim.stat().st_mtime)
+        if idx is None:
+            st.info("Could not load similarity index (see logs).")
+        else:
+            k_nn = st.slider("Neighbors (k)", 3, 30, 10, key="parcel_sim_k")
+
+            def _norm_crop(x: Any) -> str | None:
+                if x is None or (isinstance(x, float) and np.isnan(x)):
+                    return None
+                if pd.isna(x):
+                    return None
+                s = str(x).strip()
+                return s if s else None
+
+            try:
+                nns = idx.nearest_neighbors(str(selected_pid), k_nn)
+            except KeyError:
+                st.info(
+                    "This parcel is not in the similarity index (no seasonal embeddings). "
+                    "Run **1-Embed** then **5-Index**."
+                )
+            else:
+                if nns:
+                    q_crop = row.get("crop_name")
+                    q_crop_s = str(q_crop).strip() if pd.notna(q_crop) and q_crop else None
+                    qc_ref = _norm_crop(q_crop)
+
+                    q_rows: list[dict[str, Any]] = []
+                    qm = idx.meta[idx.meta["parcel_id"].astype(str) == str(selected_pid)]
+                    if not qm.empty:
+                        qr = qm.iloc[0]
+                        q_rows.append(
+                            {
+                                "parcel_id": str(selected_pid),
+                                "geometry": qr.geometry,
+                                "crop_name": q_crop_s,
+                                "map_role": "query",
+                                "similarity_note": "Selected parcel",
+                            }
+                        )
+                    for nn in nns:
+                        nm = idx.meta[idx.meta["parcel_id"].astype(str) == nn.parcel_id]
+                        if nm.empty:
+                            continue
+                        nr = nm.iloc[0]
+                        nc = _norm_crop(nn.crop_name)
+                        if qc_ref and nc and nc != qc_ref:
+                            role = "neighbor_diff"
+                            note = (
+                                f"cos_sim={nn.similarity:.3f} \u2014 different crop "
+                                "(rotation/mislabel signal)"
+                            )
+                        else:
+                            role = "neighbor_same"
+                            note = f"cos_sim={nn.similarity:.3f}"
+                        q_rows.append(
+                            {
+                                "parcel_id": nn.parcel_id,
+                                "geometry": nr.geometry,
+                                "crop_name": nn.crop_name,
+                                "map_role": role,
+                                "similarity_note": note,
+                            }
+                        )
+                    sim_gdf = gpd.GeoDataFrame(q_rows, geometry="geometry", crs=scored.crs)
+                    _render_kepler_map_similarity(sim_gdf, height=380, zoom=13)
+                    tbl = pd.DataFrame(
+                        [
+                            {
+                                "parcel_id": nn.parcel_id,
+                                "crop": nn.crop_name,
+                                "cosine_sim": round(nn.similarity, 4),
+                                "cosine_dist": round(nn.cosine_distance, 4),
+                                "diff_crop": bool(
+                                    qc_ref
+                                    and _norm_crop(nn.crop_name)
+                                    and _norm_crop(nn.crop_name) != qc_ref
+                                ),
+                            }
+                            for nn in nns
+                        ]
+                    )
+                    st.dataframe(tbl, use_container_width=True)
+                else:
+                    st.caption("No neighbors returned.")
 
     st.subheader("Temporal Deviation")
     traj_str = row.get("distance_trajectory", "[]")

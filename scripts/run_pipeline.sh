@@ -21,4 +21,5 @@ echo ""
 bash scripts/run_monitor.sh $MONITOR_CONFIG
 
 echo ""
+echo "Phase 3 includes similarity index (step 5/5 of the monitor script)."
 echo "Full pipeline complete."
