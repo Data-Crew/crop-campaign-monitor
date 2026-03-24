@@ -21,5 +21,5 @@ echo ""
 bash scripts/run_monitor.sh $MONITOR_CONFIG
 
 echo ""
-echo "Phase 3 includes similarity index (step 5/5 of the monitor script)."
+echo "Phase 3 monitor runs 6 steps (embed through LLM explain when llm.enabled is true)."
 echo "Full pipeline complete."

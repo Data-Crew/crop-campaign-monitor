@@ -9,6 +9,7 @@ action tables, filtered by the selected region.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -221,6 +222,17 @@ def _load_scores() -> gpd.GeoDataFrame | None:
     path = OUTPUT_DIR / "parcel_scores.parquet"
     if path.exists():
         return gpd.read_parquet(path)
+    return None
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def _load_parcel_explanations() -> pd.DataFrame | None:
+    path = OUTPUT_DIR / "parcel_explanations.parquet"
+    if path.exists():
+        try:
+            return pd.read_parquet(path)
+        except Exception:
+            return None
     return None
 
 
@@ -566,6 +578,7 @@ def sidebar() -> dict[str, Any]:
             "parcel_scores.parquet",
             "campaign_report.json",
             "scoring_thresholds.json",
+            "parcel_explanations.parquet",
             "parcels.faiss",
             "parcels_index_meta.parquet",
             "parcels_vectors.npz",
@@ -757,17 +770,19 @@ def tab_scripting(ctx: dict[str, Any]) -> None:
             st.warning("No trained encoder \u2014 will use mock embeddings")
 
         mo_steps = {
-            "All (embed+profile+score+report+index)": "Run the full monitor pipeline.",
+            "All (embed+profile+score+report+index+explain)": "Run the full monitor pipeline.",
             "1-Embed": "Produce 768-dim embeddings from chips (GPU).",
             "2-Profile": "Build reference trajectory per crop type.",
             "3-Score": "Cosine distance against crop reference profile.",
             "4-Report": "Generate scored GeoJSON, CSV, and campaign report.",
             "5-Index": "Build FAISS similarity index (cosine neighbors on seasonal embeddings).",
+            "6-Explain": "LLM explanations for scored parcels (optional; set llm.enabled in config).",
         }
 
         labeled_exists = (OUTPUT_DIR / "parcels_labeled.parquet").exists()
         steps_needing_labeled = {
-            "All (embed+profile+score+report+index)", "2-Profile", "3-Score", "4-Report", "5-Index",
+            "All (embed+profile+score+report+index+explain)",
+            "2-Profile", "3-Score", "4-Report", "5-Index", "6-Explain",
         }
 
         c_sel, c_run, c_step = st.columns([2, 1, 1])
@@ -782,7 +797,7 @@ def tab_scripting(ctx: dict[str, Any]) -> None:
                     _enqueue_run(
                         f"{gpu_env} bash scripts/run_monitor.sh config/monitor.yaml "
                         f"{overrides} {scoring_overrides}",
-                        "Monitor (embed+profile+score+report+index)", phase="mo",
+                        "Monitor (embed+profile+score+report+index+explain)", phase="mo",
                     )
         with c_step:
             if st.button("Run Step", key="mo_run_step", use_container_width=True):
@@ -790,7 +805,7 @@ def tab_scripting(ctx: dict[str, Any]) -> None:
                     st.error("**parcels_labeled.parquet** missing \u2014 run Phase 1 \u2192 Ingest first.")
                 else:
                     mo_map = {
-                        "All (embed+profile+score+report+index)": (
+                        "All (embed+profile+score+report+index+explain)": (
                             f"{gpu_env} bash scripts/run_monitor.sh config/monitor.yaml "
                             f"{overrides} {scoring_overrides}"
                         ),
@@ -802,6 +817,7 @@ def tab_scripting(ctx: dict[str, Any]) -> None:
                         ),
                         "4-Report": f"{gpu_env} bash scripts/run_step.sh report config/monitor.yaml {overrides}",
                         "5-Index": f"{gpu_env} bash scripts/run_step.sh index config/monitor.yaml {overrides}",
+                        "6-Explain": f"{gpu_env} bash scripts/run_step.sh explain config/monitor.yaml {overrides}",
                     }
                     _enqueue_run(mo_map[mo_step], f"Monitor \u2192 {mo_step}", phase="mo")
         st.caption(mo_steps[mo_step])
@@ -1045,6 +1061,75 @@ def tab_parcel_detail(ctx: dict[str, Any]) -> None:
                     st.dataframe(tbl, use_container_width=True)
                 else:
                     st.caption("No neighbors returned.")
+
+    st.subheader("LLM explanation")
+    exp_df = _load_parcel_explanations()
+    gpu_e = ctx.get("gpu_env", "")
+    ov = ctx.get("overrides", "")
+    show_llm = st.checkbox("Show LLM explanations", value=True, key="parcel_llm_show")
+    q_mode = st.selectbox(
+        "Quality mode (regenerate)",
+        ["auto", "high", "low"],
+        index=0,
+        key="parcel_llm_quality",
+        help="Sets llm.profile_override when using Regenerate (except auto).",
+    )
+    prof_suffix = ""
+    if q_mode == "high":
+        prof_suffix = " llm.profile_override=high"
+    elif q_mode == "low":
+        prof_suffix = " llm.profile_override=low"
+    regen_cmd = (
+        f"{gpu_e} {sys.executable} -m src.explain --config config/monitor.yaml "
+        f"{ov} llm.enabled=true{prof_suffix} --parcel-id {shlex.quote(str(selected_pid))}"
+    )
+    if st.button("Regenerate explanation for this parcel", key="parcel_llm_regen"):
+        _run_script(regen_cmd, step_name="Monitor \u2192 Explain (one parcel)")
+
+    if show_llm:
+        if exp_df is None:
+            st.info(
+                "No **parcel_explanations.parquet** yet. Enable `llm.enabled` in config and run "
+                "**6-Explain**, or use **Regenerate** above."
+            )
+        else:
+            ex_match = exp_df[exp_df["parcel_id"].astype(str) == str(selected_pid)]
+            if ex_match.empty:
+                st.caption("No stored explanation for this parcel — use Regenerate or run **6-Explain**.")
+            else:
+                exp_raw = ex_match.iloc[0].get("explanation_json")
+                try:
+                    exp = json.loads(exp_raw) if isinstance(exp_raw, str) else exp_raw
+                except (json.JSONDecodeError, TypeError):
+                    exp = {}
+                if exp:
+                    color_map = {
+                        "normal": "\U0001f7e2",
+                        "warning": "\U0001f7e1",
+                        "critical": "\U0001f534",
+                        "insufficient_data": "\u26ab",
+                    }
+                    st_icon = color_map.get(str(exp.get("status", "")), "\u2753")
+                    st.markdown(
+                        f"### {st_icon} LLM assessment: **{str(exp.get('status', 'unknown')).upper()}**"
+                    )
+                    st.info(exp.get("summary", ""))
+                    ev = exp.get("evidence_used") or []
+                    if ev:
+                        st.markdown("**Evidence used:**")
+                        for e in ev:
+                            st.markdown(f"- {e}")
+                    causes = exp.get("possible_causes") or []
+                    if causes:
+                        st.markdown("**Possible causes (hypotheses):**")
+                        for c in causes:
+                            st.markdown(f"- _{c}_")
+                    st.success(f"**Recommended action:** {exp.get('recommended_action', '')}")
+                    c_llm1, c_llm2 = st.columns(2)
+                    c_llm1.metric("Confidence", str(exp.get("confidence", "")).upper())
+                    c_llm2.metric("Consistency", str(exp.get("consistency_check", "")))
+                    with st.expander("Raw LLM output"):
+                        st.json(exp)
 
     st.subheader("Temporal Deviation")
     traj_str = row.get("distance_trajectory", "[]")

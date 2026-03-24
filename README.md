@@ -37,8 +37,8 @@ dependencies:
                               report ──► parcel_scores.geojson
                                               │
                                         ┌─────▼──────┐
-                                        │  Streamlit  │
-                                        │  Dashboard  │
+                                        │  Streamlit │
+                                        │  Dashboard │
                                         └────────────┘
 ```
 

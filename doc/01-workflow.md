@@ -26,23 +26,27 @@ profile for its crop type.
              ├──────────────────────────────┐
              ▼                              ▼
     ┌─────────────────────┐     ┌───────────────────────┐
-    │  Phase 2: Training  │     │  Phase 3: Monitor          │
-    │  prepare → finetune │     │  embed → profile →         │
-    │  → export_encoder   │     │  score → report → index    │
-    └────────┬────────────┘     └───────────┬────────────────┘
-             │  clay-crop-encoder.ckpt      │
-             └──────────────────────────────┘
+    │  Phase 2: Training  │     │  Phase 3: Monitor               │
+    │  prepare → finetune │     │  embed → profile →              │
+    │  → export_encoder   │     │  score → report → index         │
+    └────────┬────────────┘     │  → explain (optional LLM)       │
+             │  clay-crop-      └───────────┬─────────────────────┘
+             │  encoder.ckpt               │
+             └─────────────────────────────┘
                                             │
                                   parcel_scores.geojson
                                   campaign_report.json
                                   parcels.faiss
                                   parcels_index_meta.parquet
+                                  parcel_explanations.parquet
                                             │
                                      ┌──────▼──────┐
                                      │  Streamlit  │
                                      │  Dashboard  │
                                      │  + Similar  │
                                      │    Parcels  │
+                                     │  + LLM      │
+                                     │    Explain  │
                                      └─────────────┘
 ```
 
@@ -805,6 +809,163 @@ from a YAML config, or `--output-dir` to point to a custom directory.
 
 ---
 
+### Step 10 — Explain (`src/explain.py`)
+
+**What it does:** runs a local LLM (via Hugging Face Transformers) to generate
+a structured agronomic explanation for each scored parcel.  It reads
+`parcel_scores.parquet` and `scoring_thresholds.json` (written by the score
+step), builds a structured payload of metrics per parcel, and asks the model to
+reason about crop health in JSON format.
+
+This step is **entirely optional** and **read-only**: it does not modify any
+pipeline output, only appends `parcel_explanations.parquet`.
+
+**Enabling the step:**
+
+```yaml
+# config/monitor.yaml
+llm:
+  enabled: true
+  profile_override: null   # null = auto-detect by VRAM
+```
+
+Or pass as a CLI override without editing the file:
+
+```bash
+python -m src.explain --config config/monitor.yaml llm.enabled=true
+# One specific parcel only:
+python -m src.explain --config config/monitor.yaml llm.enabled=true --parcel-id P-0042
+```
+
+#### GPU profile auto-selection
+
+`src/llm.py` calls `src.gpu.discover_gpus()` to check available VRAM and picks
+a profile automatically:
+
+| Profile | Default model | VRAM target | Typical use |
+|---------|--------------|-------------|-------------|
+| `high` | `microsoft/Phi-3.5-mini-instruct` (fp16) | ≥ 8 GB | RTX 4070 |
+| `low` | `Qwen/Qwen2.5-1.5B-Instruct` (4-bit) | ~1.2 GB | RTX 500 Ada, CPU |
+
+The threshold (default 8 GB) and profile names are configurable in
+`config/monitor.yaml` under `llm.vram_threshold_gb` and `llm.profiles`.
+
+#### Payload built per parcel
+
+`build_payload()` in `src/explain.py` assembles all inputs from existing data:
+
+```python
+{
+  "parcel_id": "16tgk_00_00_42",
+  "crop_name": "soybeans",
+  "health_score": 0.0069,
+  "status": "GREEN",
+  "n_observations": 15,
+  "max_deviation_date": null,
+  "distance_summary": {"mean": 0.004, "max": 0.012, "min": 0.001, "std": 0.003, "n_points": 15},
+  "trajectory_flags": [],          # early_deviation / persistent_deviation / worsening_trend
+  "data_quality_flags": [],        # few_observations / insufficient_data
+  "context": {
+    "season_start": "2024-04-15",
+    "season_end": "2024-10-31",
+    "cadence_days": 16,
+    "scoring_method": "adaptive",
+    "green_threshold": 0.058,
+    "red_threshold": 0.096
+  }
+}
+```
+
+The thresholds come from `scoring_thresholds.json` (the effective values
+computed at scoring time, not the YAML defaults), so adaptive thresholds are
+reflected correctly.
+
+#### Trajectory flags
+
+| Flag | Trigger |
+|------|---------|
+| `early_deviation` | Max distance in first ⅓ of season exceeds green threshold |
+| `persistent_deviation` | Last 3 observations all above green threshold |
+| `worsening_trend` | > 60% of consecutive observation pairs show increasing distance |
+
+These flags appear in the payload and the LLM is instructed to reference them
+explicitly in `evidence_used`.
+
+#### JSON output contract
+
+The LLM is instructed to return a strict JSON object.  `src/explain_schema.py`
+validates it with Pydantic v2:
+
+```python
+class ParcelExplanation(BaseModel):
+    status: "normal | warning | critical | insufficient_data"
+    summary: str                # 1–3 sentences
+    possible_causes: list[str]  # max 5, stated as hypotheses
+    confidence: "low | medium | high"
+    recommended_action: str
+    evidence_used: list[str]    # max 8, referencing payload values
+    consistency_check: "consistent | weakly_supported | unsupported"
+```
+
+`consistency_check` is set to `unsupported` automatically if the LLM's
+`status` contradicts the scoring system's traffic-light status.
+
+**Status normalization:** because small models sometimes output traffic-light
+values (`"GREEN"`) instead of schema enum values (`"normal"`),
+`_normalize_data()` in `src/explain_schema.py` maps both forms before
+validation:
+
+```
+"GREEN" → "normal"  |  "YELLOW" → "warning"
+"RED"   → "critical"|  "GRAY"   → "insufficient_data"
+```
+
+#### Retry and fallback
+
+If JSON parsing or Pydantic validation fails on the first attempt, the step
+retries once at a higher temperature (`llm.retry_temperature`, default 0.35).
+If the retry also fails, a `fallback_explanation()` is stored with
+`consistency_check = "unsupported"` and `confidence = "low"` so the parquet
+always has a complete row per parcel.
+
+#### Incremental regeneration
+
+The `--parcel-id` flag triggers a **single-parcel update**: only that parcel is
+re-explained, and the result is merged back into the existing
+`parcel_explanations.parquet` without touching other rows.
+
+```bash
+python -m src.explain --config config/monitor.yaml llm.enabled=true --parcel-id P-0042
+```
+
+The `skip_if_unchanged` config option (default `false`) adds SHA-256 hashing
+of the payload — if the parcel's scores have not changed since the last run,
+the stored explanation is reused without calling the LLM.
+
+#### Mock mode
+
+Set `llm.use_mock: true` (or pass `--mock`) to generate deterministic placeholder
+JSON without loading any model.  Useful for pipeline smoke-tests:
+
+```bash
+python -m src.explain --config config/monitor.yaml llm.enabled=true --mock
+```
+
+**Output — `data/output/parcel_explanations.parquet`:**
+
+| column | type | description |
+|--------|------|-------------|
+| `parcel_id` | string | Matches `parcel_scores.parquet` |
+| `explanation_json` | string | Serialised `ParcelExplanation` dict |
+| `llm_status` | string | `status` field extracted for fast filtering |
+| `llm_confidence` | string | `confidence` field extracted |
+| `llm_model` | string | Model ID used (or `"mock"`) |
+| `profile` | string | `"high"`, `"low"`, or `"mock"` |
+| `generated_at` | string | UTC ISO-8601 timestamp |
+| `payload_hash` | string | SHA-256 of the payload (for `skip_if_unchanged`) |
+
+---
+
 ## Pipeline summary — all outputs
 
 | Step | Module | Key output |
@@ -818,3 +979,4 @@ from a YAML config, or `--output-dir` to point to a custom directory.
 | 7 — Report | `src/report.py` | `campaign_report.json` |
 | 8 — Index | `src/index.py` | `parcels.faiss`, `parcels_index_meta.parquet` |
 | 9 — Query | `src/query.py` | CLI / importable API (no file output) |
+| 10 — Explain *(optional)* | `src/explain.py` | `parcel_explanations.parquet` |

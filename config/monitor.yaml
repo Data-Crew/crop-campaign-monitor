@@ -61,6 +61,31 @@ gpu:
   default_device: "RTX 4070"
   smoke_test_device: "RTX 500"
 
+# ── LLM Explanation (optional; explain step) ─────────
+llm:
+  enabled: false
+  use_mock: false          # true = deterministic JSON without loading Transformers
+  gpu_device: null         # null = auto (device_map); or set cuda device index
+  profiles:
+    high:
+      model_id: "microsoft/Phi-3.5-mini-instruct"
+      dtype: "float16"
+      quantization: null
+      max_new_tokens: 512
+    low:
+      model_id: "Qwen/Qwen2.5-1.5B-Instruct"
+      dtype: "float16"
+      quantization: "4bit"
+      max_new_tokens: 384
+  profile_override: null   # force "high" or "low"; null = auto by VRAM
+  vram_threshold_gb: 8
+  batch_size: 10
+  max_parcels: null
+  temperature: 0.1
+  top_p: 0.9
+  retry_temperature: 0.35
+  skip_if_unchanged: false
+
 # ── Output ──────────────────────────────────────────
 output:
   dir: "data/output"

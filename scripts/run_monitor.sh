@@ -35,20 +35,23 @@ if [ ! -d "data/chips" ] || [ -z "$(ls -A data/chips 2>/dev/null)" ]; then
   exit 1
 fi
 
-echo "[1/5] Generating embeddings (GPU)..."
+echo "[1/6] Generating embeddings (GPU)..."
 python -m src.embed --config "$CONFIG" "${OVERRIDES[@]}"
 
-echo "[2/5] Building reference profiles..."
+echo "[2/6] Building reference profiles..."
 python -m src.profile --config "$CONFIG" "${OVERRIDES[@]}"
 
-echo "[3/5] Scoring parcels..."
+echo "[3/6] Scoring parcels..."
 python -m src.score --config "$CONFIG" "${OVERRIDES[@]}"
 
-echo "[4/5] Generating report..."
+echo "[4/6] Generating report..."
 python -m src.report --config "$CONFIG" "${OVERRIDES[@]}"
 
-echo "[5/5] Build similarity index..."
+echo "[5/6] Build similarity index..."
 python -m src.index --config "$CONFIG" "${OVERRIDES[@]}"
+
+echo "[6/6] Generating LLM explanations..."
+python -m src.explain --config "$CONFIG" "${OVERRIDES[@]}"
 
 echo ""
 echo "Monitor complete. Results in data/output/"
