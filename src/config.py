@@ -23,6 +23,9 @@ REQUIRED_MONITOR_SECTIONS = {
     "output": ["dir"],
 }
 
+# Optional top-level keys for monitor config (not validated as required).
+OPTIONAL_MONITOR_TOP_LEVEL = ("llm",)
+
 REQUIRED_TRAIN_SECTIONS = {
     "base_model": ["backbone", "weights_path"],
     "data": ["fields_dir", "tiles", "chips_dir", "dataset_dir"],
