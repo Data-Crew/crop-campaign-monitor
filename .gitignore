@@ -60,8 +60,5 @@ htmlcov/
 *.ckpt.lock
 *.safetensors
 
-# ── App state (user-specific Kepler config) ────────
-app/kepler_*.json
-
 # ── Generated docs ─────────────────────────────────
 doc/*.html

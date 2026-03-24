@@ -1,0 +1,125 @@
+{
+    "version": "v1",
+    "config": {
+        "visState": {
+            "filters": [],
+            "layers": [
+                {
+                    "id": "basemap",
+                    "type": "basemap",
+                    "config": {
+                        "label": "Satellite",
+                        "url": "https://tiles.stadiamaps.com/tiles/alidade_smooth_satellite/{z}/{x}/{y}{r}.png",
+                        "layerType": "bitmap",
+                        "visible": true,
+                        "value": "default",
+                        "alpha": 1
+                    }
+                },
+                {
+                    "id": "parcel_health",
+                    "type": "geojson",
+                    "config": {
+                        "dataId": "parcels",
+                        "label": "Parcel Health",
+                        "color": [18, 147, 154],
+                        "columns": {
+                            "geojson": "geometry"
+                        },
+                        "isVisible": true,
+                        "visConfig": {
+                            "opacity": 0.8,
+                            "strokeOpacity": 0.8,
+                            "thickness": 0.5,
+                            "colorRange": {
+                                "name": "Traffic Light",
+                                "type": "categorical",
+                                "category": "Custom",
+                                "colors": [
+                                    "#9ca3af",
+                                    "#22c55e",
+                                    "#ef4444",
+                                    "#eab308"
+                                ],
+                                "colorMap": [
+                                    ["GRAY", "#9ca3af"],
+                                    ["GREEN", "#22c55e"],
+                                    ["RED", "#ef4444"],
+                                    ["YELLOW", "#eab308"]
+                                ]
+                            },
+                            "strokeColor": [255, 255, 255],
+                            "stroked": false,
+                            "filled": true,
+                            "extruded": false
+                        },
+                        "textLabel": []
+                    },
+                    "visualChannels": {
+                        "colorField": {
+                            "name": "status",
+                            "type": "string"
+                        },
+                        "colorScale": "ordinal",
+                        "strokeColorField": null,
+                        "strokeColorScale": "ordinal",
+                        "sizeField": null,
+                        "sizeScale": "linear"
+                    }
+                }
+            ],
+            "interactionConfig": {
+                "tooltip": {
+                    "fieldsToShow": {
+                        "parcels": ["parcel_id", "crop_name", "status", "health_score", "n_observations"]
+                    },
+                    "enabled": true
+                },
+                "brush": {
+                    "size": 0.5,
+                    "enabled": false
+                },
+                "geocoder": {
+                    "enabled": false
+                },
+                "coordinate": {
+                    "enabled": false
+                }
+            },
+            "layerBlending": "normal",
+            "splitMaps": [],
+            "animationConfig": {
+                "currentTime": null,
+                "speed": 1
+            }
+        },
+        "mapState": {
+            "bearing": 0,
+            "dragRotate": false,
+            "latitude": 0,
+            "longitude": 0,
+            "pitch": 0,
+            "zoom": 11,
+            "isSplit": false
+        },
+        "mapStyle": {
+            "styleType": "satellite",
+            "topLayerGroups": {},
+            "visibleLayerGroups": {
+                "label": true,
+                "road": true,
+                "border": false,
+                "building": false,
+                "water": true,
+                "land": true,
+                "3d building": false
+            },
+            "threeDBuildingColor": [
+                9.665468314072013,
+                17.18305478057247,
+                31.1442867897876
+            ],
+            "mapStyles": {}
+        }
+    }
+}
