@@ -3,6 +3,9 @@
 > How the Vision Transformer inside Clay converts satellite imagery
 > into semantic embeddings, how fine-tuning shapes those embeddings,
 > and why the classification head is discarded before monitoring.
+>
+> For phase architecture and dependency rules see [00-overview.md](00-overview.md).
+> For the step-by-step pipeline workflow see [01-workflow.md](01-workflow.md).
 
 ---
 

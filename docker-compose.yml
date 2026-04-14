@@ -1,40 +1,109 @@
+# ── Shared configuration ───────────────────────────────────────────────────────
+# All services use the same image, bind mounts, and GPU wiring.
+# The anchor below is merged with <<: *gpu-config in each service definition.
+# Job services (data-prep, training, monitor, pipeline) require profiles: [jobs]
+# and are not started by `docker compose up`. Run them with:
+#   docker compose run --rm <service>
+x-gpu-config: &gpu-config
+  build: .
+  environment:
+    - GPU_NAME=${GPU_NAME:-RTX 4070}
+    - MAPBOX_API_ACCESS_TOKEN=${MAPBOX_API_ACCESS_TOKEN:-pk.eyJ1IjoidWNmLW1hcGJveCIsImEiOiJja3RpeXhkaXcxNzJtMnZxbmtkcnJuM3BkIn0.kGmGlkbuWaCBf7_RrZXULg}
+    - NVIDIA_VISIBLE_DEVICES=all
+    - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+  volumes:
+    - ./config:/app/config
+    - ./data:/app/data
+    - ./src:/app/src
+    - ./train:/app/train
+    - ./app:/app/app
+    - ./scripts:/app/scripts
+    # Host NVIDIA libraries — manual GPU passthrough (default supported approach).
+    # Paths assume x86_64 Linux with NVIDIA drivers installed on the host.
+    - /usr/lib/x86_64-linux-gnu/libcuda.so.1:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro
+    - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
+    - /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro
+    - /usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:ro
+  devices:
+    # GPU devices visible to the container.
+    # Add /dev/nvidia2, /dev/nvidia3 … for additional GPUs.
+    # If your host has only one GPU, remove /dev/nvidia1.
+    # If GPU topology changes after container startup, run:
+    #   docker compose down && docker compose up -d
+    - /dev/nvidia0:/dev/nvidia0
+    - /dev/nvidia1:/dev/nvidia1
+    - /dev/nvidiactl:/dev/nvidiactl
+    - /dev/nvidia-uvm:/dev/nvidia-uvm
+    - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+
 services:
-  monitor:
-    build: .
-    environment:
-      - GPU_NAME=${GPU_NAME:-RTX 4070}
-      - MAPBOX_API_ACCESS_TOKEN=${MAPBOX_API_ACCESS_TOKEN:-pk.eyJ1IjoidWNmLW1hcGJveCIsImEiOiJja3RpeXhkaXcxNzJtMnZxbmtkcnJuM3BkIn0.kGmGlkbuWaCBf7_RrZXULg}
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
-    volumes:
-      - ./config:/app/config
-      - ./data:/app/data
-      - ./src:/app/src
-      - ./train:/app/train
-      - ./app:/app/app
-      - ./scripts:/app/scripts
-      - /usr/lib/x86_64-linux-gnu/libcuda.so.1:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:ro
-    devices:
-      - /dev/nvidia0:/dev/nvidia0
-      - /dev/nvidia1:/dev/nvidia1
-      - /dev/nvidiactl:/dev/nvidiactl
-      - /dev/nvidia-uvm:/dev/nvidia-uvm
-      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
-    ports:
-      - "8501:8501"
-    # Uncomment deploy section below once nvidia-container-toolkit is installed,
-    # and remove the manual devices/volumes mounts above.
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+
+  # ── Persistent services ─────────────────────────────────────────────────────
+  # Started by `docker compose up -d`. Remain running until explicitly stopped.
+
+  workspace:
+    <<: *gpu-config
+    container_name: ccm-workspace
+    # Interactive shell. Access with: docker compose exec workspace bash
     entrypoint: ["bash"]
     stdin_open: true
     tty: true
+
+  dashboard:
+    <<: *gpu-config
+    container_name: ccm-dashboard
+    ports:
+      - "8501:8501"
+    # Starts the Streamlit dashboard automatically.
+    # Open http://localhost:8501 after `docker compose up -d dashboard`.
+    entrypoint: ["bash", "-c", "streamlit run app/dashboard.py --server.port 8501 --server.address 0.0.0.0"]
+
+  # ── One-shot pipeline jobs ──────────────────────────────────────────────────
+  # Not started by `docker compose up`. Run with: docker compose run --rm <service>
+  # Arguments are forwarded to the underlying script (e.g. a custom config path).
+
+  data-prep:
+    <<: *gpu-config
+    profiles: [jobs]
+    # Phase 1 — Data Preparation (ingest → fetch → chip)
+    # Usage: docker compose run --rm data-prep
+    entrypoint: ["bash", "scripts/run_data_prep.sh"]
+
+  training:
+    <<: *gpu-config
+    profiles: [jobs]
+    # Phase 2 — Training (prepare → finetune → export_encoder)  [optional]
+    # Usage: docker compose run --rm training
+    entrypoint: ["bash", "scripts/run_training.sh"]
+
+  monitor:
+    <<: *gpu-config
+    profiles: [jobs]
+    # Phase 3 — Monitor (embed → profile → score → report → index → explain)
+    # Usage: docker compose run --rm monitor
+    entrypoint: ["bash", "scripts/run_monitor.sh"]
+
+  pipeline:
+    <<: *gpu-config
+    profiles: [jobs]
+    # Full pipeline — all three phases in sequence (Phase 1 → 2 → 3)
+    # Usage: docker compose run --rm pipeline
+    entrypoint: ["bash", "scripts/run_pipeline.sh"]
+
+  # ── Optional advanced alternative: NVIDIA Container Toolkit ────────────────
+  # If nvidia-container-toolkit is installed on the host, you can replace the
+  # manual `devices` and NVIDIA library `volumes` in x-gpu-config with a
+  # `deploy` block. This is an optional alternative — it is NOT required for
+  # the default supported setup and is NOT validated against this repository.
+  #
+  # To use it, remove the `devices` and NVIDIA lib entries from x-gpu-config,
+  # and add the following under the relevant service(s):
+  #
+  # deploy:
+  #   resources:
+  #     reservations:
+  #       devices:
+  #         - driver: nvidia
+  #           count: all
+  #           capabilities: [gpu]

@@ -2,38 +2,67 @@
 
 ## System Overview
 
-The Crop Campaign Monitor is composed of two pipelines that share common
+The Crop Campaign Monitor is organized into **three phases** that share common
 infrastructure (config, GPU management, chip extraction, and field ingestion):
 
-1. **Training pipeline** (`train/`): Fine-tunes the Clay Foundation Model
+1. **Phase 1 — Data Preparation** (`src/ingest.py`, `src/fetch.py`,
+   `src/chip.py`): Ingests parcel geometries, labels them with CDL crop codes,
+   fetches Sentinel-2 imagery metadata, and extracts 224 × 224 px chips. This
+   phase produces the shared inputs consumed by both Phase 2 and Phase 3.
+
+2. **Phase 2 — Training** (`train/`): Fine-tunes the Clay Foundation Model
    backbone with CDL crop labels via TerraTorch. Produces an encoder checkpoint
-   optimized for crop discrimination.
+   optimized for crop discrimination. This phase is **optional**.
 
-2. **Monitor pipeline** (`src/`): Uses the encoder to embed Sentinel-2 chips,
-   builds per-crop reference profiles, and scores each parcel against its
-   expected trajectory.
+3. **Phase 3 — Monitor** (`src/embed.py` … `src/report.py`): Uses the encoder
+   to embed Sentinel-2 chips, builds per-crop reference profiles, and scores
+   each parcel against its expected trajectory.
 
-## Pipeline Flow
+For step-by-step execution details see [01-workflow.md](01-workflow.md).
+For Docker and GPU setup see [doc/03-runtime-stack.md](03-runtime-stack.md).
 
-### Monitor Pipeline (7 Steps)
+---
+
+## Phase Dependencies
+
+| Rule | Detail |
+|------|--------|
+| Phase 1 is a required bootstrap stage | It must run at least once for every region before either Phase 2 or Phase 3 can execute. |
+| Phase 2 is optional | The monitor can run without a fine-tuned encoder. `src/embed.py` falls back to the pre-trained Clay base, or to a mock encoder if no weights exist (logged as WARNING). |
+| Phase 3 requires Phase 1 outputs | `parcels_labeled.parquet` and `data/chips/` must exist. Phase 3 never runs without them. |
+| Both Phase 2 and Phase 3 depend on Phase 1 | Phase 2 consumes `parcels_labeled.parquet` and `.npz` chips. Phase 3 consumes the same chips plus, optionally, the encoder from Phase 2. |
+| Region / season / CDL changes invalidate Phase 1 outputs | If `region.tiles`, `season.start_date`, `season.end_date`, or `cdl.source` change in a way that produces different chips or labels, Phase 1 must be re-run before downstream phases. |
+
+---
+
+## Pipeline Steps
+
+### Phase 1 — Data Preparation
 
 | Step | Module | Input | Output |
 |------|--------|-------|--------|
 | 1. Ingest | `src/ingest.py` | GeoJSON parcels + CDL | `parcels_labeled.parquet` |
 | 2. Fetch | `src/fetch.py` | Parcel bounds + STAC | `tile_index.parquet` |
 | 3. Chip | `src/chip.py` | COG URLs + parcels | `.npz` chips per parcel/date |
-| 4. Embed | `src/embed.py` | `.npz` chips + Clay model | `.npy` embeddings |
-| 5. Profile | `src/profile.py` | Embeddings + crop labels | `reference_profiles.pkl` |
-| 6. Score | `src/score.py` | Embeddings + profiles | `parcel_scores.parquet/.geojson` |
-| 7. Report | `src/report.py` | Scored parcels | `campaign_report.json` |
 
-### Training Pipeline (3 Steps)
+### Phase 2 — Training (optional)
 
 | Step | Module | Input | Output |
 |------|--------|-------|--------|
 | 1. Prepare | `train/prepare_dataset.py` | CDL raster + chips | Manifest CSVs |
 | 2. Fine-tune | `train/finetune.py` | Manifests + Clay base | `clay-finetuned-crops.ckpt` |
 | 3. Export | `train/export_encoder.py` | Fine-tuned checkpoint | `clay-crop-encoder.ckpt` |
+
+### Phase 3 — Monitor
+
+| Step | Module | Input | Output |
+|------|--------|-------|--------|
+| 4. Embed | `src/embed.py` | `.npz` chips + Clay model | `.npy` embeddings |
+| 5. Profile | `src/profile.py` | Embeddings + crop labels | `reference_profiles.pkl` |
+| 6. Score | `src/score.py` | Embeddings + profiles | `parcel_scores.parquet/.geojson` |
+| 7. Report | `src/report.py` | Scored parcels | `campaign_report.json` |
+
+---
 
 ## Data Formats
 
@@ -79,6 +108,8 @@ bands:     list[str] — band names ["B02", "B03", ...]
 | distance_trajectory | str (JSON) | Per-observation cosine distances |
 | geometry | Polygon | Parcel boundary |
 
+---
+
 ## Model Loading Cascade
 
 `src/embed.py` tries three sources in order:
@@ -93,6 +124,8 @@ bands:     list[str] — band names ["B02", "B03", ...]
 
 3. **Mock encoder**: Deterministic random 768-dim vectors seeded by parcel_id.
    Allows full pipeline testing without any model weights. Logs a WARNING.
+
+---
 
 ## Scoring Algorithm
 
@@ -114,6 +147,8 @@ For each parcel:
    - Fewer than `min_observations` cloud-free dates
    - Crop type has no reference profile (too few parcels)
    - No CDL label assigned
+
+---
 
 ## COG Access Pattern
 

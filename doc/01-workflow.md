@@ -2,6 +2,9 @@
 
 > Step-by-step explanation of the full pipeline, from raw field
 > boundaries to per-parcel health scores.
+>
+> For phase dependency rules see [00-overview.md](00-overview.md).
+> For Docker and GPU setup see [03-runtime-stack.md](03-runtime-stack.md).
 
 ---
 
