@@ -28,14 +28,14 @@ profile for its crop type.
              │  chips (.npz)  +  parcels_labeled.parquet
              ├──────────────────────────────┐
              ▼                              ▼
-    ┌─────────────────────┐     ┌───────────────────────┐
-    │  Phase 2: Training  │     │  Phase 3: Monitor               │
-    │  prepare → finetune │     │  embed → profile →              │
-    │  → export_encoder   │     │  score → report → index         │
-    └────────┬────────────┘     │  → explain (optional LLM)       │
-             │  clay-crop-      └───────────┬─────────────────────┘
-             │  encoder.ckpt               │
-             └─────────────────────────────┘
+    ┌─────────────────────┐     ┌───────────────────────────┐
+    │  Phase 2: Training  │     │  Phase 3: Monitor         │
+    │  prepare → finetune │     │  embed → profile →        │
+    │  → export_encoder   │     │  score → report → index   │
+    └────────┬────────────┘     │  → explain (optional LLM) │
+             │  clay-crop-      └───────────┬───────────────┘
+             │  encoder.ckpt                │
+             └──────────────────────────────┘
                                             │
                                   parcel_scores.geojson
                                   campaign_report.json
@@ -43,7 +43,8 @@ profile for its crop type.
                                   parcels_index_meta.parquet
                                   parcel_explanations.parquet
                                             │
-                                     ┌──────▼──────┐
+                                            ▼
+                                     ┌─────────────┐
                                      │  Streamlit  │
                                      │  Dashboard  │
                                      │  + Similar  │
