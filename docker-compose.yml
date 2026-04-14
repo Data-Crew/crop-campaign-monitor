@@ -12,6 +12,9 @@ x-gpu-config: &gpu-config
     - NVIDIA_VISIBLE_DEVICES=all
     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
+    # Persist HuggingFace model cache across container recreations.
+    # Models are stored in data/hf_cache/ on the host (bind-mounted via ./data).
+    - HF_HOME=/app/data/hf_cache
   volumes:
     - ./config:/app/config
     - ./data:/app/data
@@ -26,13 +29,19 @@ x-gpu-config: &gpu-config
     - /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro
     - /usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:ro
   devices:
-    # GPU devices visible to the container.
-    # Add /dev/nvidia2, /dev/nvidia3 … for additional GPUs.
-    # If your host has only one GPU, remove /dev/nvidia1.
-    # If GPU topology changes after container startup, run:
-    #   docker compose down && docker compose up -d
+    # GPU device nodes for this machine:
+    #   nvidia0 = RTX 500 Ada Generation (integrated, always present)    ~4 GB VRAM
+    #   nvidia1 = GeForce RTX 4070 (eGPU, external)                     ~12 GB VRAM
+    #
+    # When disconnecting the eGPU:
+    #   1. Comment out /dev/nvidia1 below
+    #   2. docker compose down && docker compose up -d
+    # When reconnecting the eGPU: uncomment /dev/nvidia1 and recreate.
+    #
+    # Note: the active GPU topology also affects the LLM explain step —
+    # see doc/03-runtime-stack.md § LLM Explain Step.
     - /dev/nvidia0:/dev/nvidia0
-    - /dev/nvidia1:/dev/nvidia1
+    - /dev/nvidia1:/dev/nvidia1   # eGPU — comment out when disconnected
     - /dev/nvidiactl:/dev/nvidiactl
     - /dev/nvidia-uvm:/dev/nvidia-uvm
     - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools

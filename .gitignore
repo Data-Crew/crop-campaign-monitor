@@ -5,6 +5,7 @@ data/embeddings/
 data/model/
 data/training/
 data/output/
+data/hf_cache/
 # GeoJSON parcels by tile/fragment (uncomment if you don’t version sample fields)
 data/fields/
 

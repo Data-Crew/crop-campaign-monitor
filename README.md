@@ -59,7 +59,8 @@ trained encoder exists.
 
 **Phase 3** generates real embeddings, builds reference profiles per crop type,
 and scores each parcel against its expected trajectory. It requires Phase 1
-outputs and never runs without them.
+outputs and never runs without them. An optional LLM step generates agronomic
+explanations per parcel — see [doc/03-runtime-stack.md § LLM Explain Step](doc/03-runtime-stack.md#llm-explain-step).
 
 See [doc/00-overview.md](doc/00-overview.md) for the full phase dependency
 contract.
@@ -280,3 +281,8 @@ Streamlit sidebar.
 - **Changing the encoder** (by re-running Phase 2) invalidates the embedding
   cache. The embed step detects this automatically via a modification-time
   stamp and regenerates affected embeddings.
+- **The LLM explain step is disabled by default** (`llm.enabled: false` in
+  `config/monitor.yaml`). The Streamlit dashboard's "Regenerate explanation"
+  button activates it on demand for a single parcel without modifying the
+  config. Which model loads depends on the available GPU VRAM at that moment —
+  see [doc/03-runtime-stack.md § LLM Explain Step](doc/03-runtime-stack.md#llm-explain-step).

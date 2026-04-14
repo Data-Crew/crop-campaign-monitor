@@ -5,6 +5,30 @@
 
 ---
 
+## Host Requirements
+
+| Requirement | Detail |
+|-------------|--------|
+| **Architecture** | x86_64 (library mount paths are architecture-specific) |
+| **NVIDIA GPU** | At least one GPU accessible as `/dev/nvidia0` |
+| **NVIDIA driver** | ≥ 550.54.14 — minimum for CUDA 12.4 on Linux |
+| **NVIDIA libraries on host** | `libcuda.so.1`, `libnvidia-ml.so.1`, `libnvidia-ptxjitcompiler.so.1`, `libnvidia-nvvm.so.4` at `/usr/lib/x86_64-linux-gnu/` |
+| **Docker Engine** | Any recent version supporting Compose v2 |
+| **Docker Compose** | v2 (`docker compose`, no hyphen) |
+| **NVIDIA Container Toolkit** | **Not required.** GPU access uses explicit device and library mounts. |
+
+**CUDA 12.4 and cuDNN 9 are bundled inside the container image** (`pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime`). They do not need to be installed on the host — only the NVIDIA driver and the raw device nodes are required.
+
+Verify your driver version before starting:
+
+```bash
+nvidia-smi --query-gpu=driver_version --format=csv,noheader
+```
+
+The output should be `550.54.14` or higher.
+
+---
+
 ## Runtime Model
 
 The environment is split into two types of services defined in
@@ -219,6 +243,78 @@ container with stale GPU mounts will typically produce CUDA errors.
 
 ---
 
+## LLM Explain Step
+
+Phase 3 includes an optional step (`src/explain.py`) that generates agronomic
+explanations per parcel using a local Hugging Face model. The full technical
+workflow for this step — configuration keys, model parameters, and prompt
+structure — is documented in
+[doc/01-workflow.md § Step 10 — Explain](01-workflow.md#step-10--explain-srcexplainpy).
+This section covers the operational aspects: how the step is activated, how the
+model is chosen automatically, and how the model cache works.
+
+### Default state
+
+The step is **disabled by default**: `llm.enabled: false` in
+`config/monitor.yaml`. When `docker compose run --rm monitor` executes,
+`src.explain` is called but exits immediately without loading any model.
+
+### Streamlit "Regenerate explanation" button
+
+The dashboard button in the **Parcel Details** tab bypasses the `llm.enabled`
+config flag entirely. It runs the explain script directly for the selected
+parcel with the flag forced on:
+
+```bash
+python -m src.explain --config config/monitor.yaml llm.enabled=true --parcel-id <id>
+```
+
+This activates the LLM for that single parcel on demand, with no change to
+`config/monitor.yaml`.
+
+### Automatic profile selection by VRAM
+
+When the LLM step runs, `src/llm.py` queries all GPUs visible to the container
+and picks a model profile based on the highest VRAM found:
+
+| Profile | Model | VRAM target | Typical scenario |
+|---------|-------|-------------|-----------------|
+| `high`  | `microsoft/Phi-3.5-mini-instruct` (fp16) | ≥ 8 GB | RTX 4070 eGPU connected |
+| `low`   | `Qwen/Qwen2.5-1.5B-Instruct` (4-bit)    | ~1.2 GB | RTX 500 Ada only, or CPU |
+
+The visible devices are determined by what was mounted into the container at
+startup. **Connecting or disconnecting the eGPU therefore changes which model
+loads** — the containers must be recreated for the new device list to take
+effect (see [§ GPU Topology Changes](#gpu-topology-changes)).
+
+Example with this machine's GPUs:
+
+```
+eGPU connected    → nvidia0 (Ada ~4 GB) + nvidia1 (RTX 4070 ~12 GB)
+                  → best VRAM = 12 GB → profile high → Phi-3.5-mini fp16
+
+eGPU disconnected → nvidia0 (Ada ~4 GB) only
+                  → best VRAM = 4 GB  → profile low  → Qwen 2.5 1.5B 4-bit
+```
+
+To override the auto-selection without editing config:
+
+```bash
+docker compose run --rm monitor config/monitor.yaml llm.enabled=true llm.profile_override=high
+```
+
+### HuggingFace model cache
+
+Models are downloaded from Hugging Face on first use and cached in
+`data/hf_cache/` on the host. The bind mount in `docker-compose.yml`
+(`./data → /app/data`) combined with `HF_HOME=/app/data/hf_cache` makes the
+cache survive container recreations and image rebuilds — each model is only
+downloaded once.
+
+`data/hf_cache/` is listed in `.gitignore` and is never committed.
+
+---
+
 ## Environment Variables
 
 Set these in a `.env` file alongside `docker-compose.yml`, or export them in
@@ -231,6 +327,7 @@ your shell before running `docker compose up`.
 | `NVIDIA_VISIBLE_DEVICES` | `all` | Makes all GPU device nodes visible inside the container. |
 | `NVIDIA_DRIVER_CAPABILITIES` | `compute,utility` | Enables CUDA compute and `nvidia-smi` inside the container. |
 | `LD_LIBRARY_PATH` | `/usr/lib/x86_64-linux-gnu` | Points the dynamic linker to the host-mounted NVIDIA libraries. |
+| `HF_HOME` | `/app/data/hf_cache` | Hugging Face model cache directory inside the container. Maps to `data/hf_cache/` on the host via the `./data` bind mount. Models are downloaded once and survive container recreations. |
 
 Example `.env` file:
 

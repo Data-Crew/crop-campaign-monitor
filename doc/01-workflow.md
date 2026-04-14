@@ -140,7 +140,7 @@ of a field at a specific date.
   ║       ┌─────────────────────┐                            ║
   ║       │                     │                            ║
   ║       │       chip          │ 224 px × 224 px            ║
-  ║       │     (2.24 km)       │ = 2.24 km × 2.24 km       ║
+  ║       │     (2.24 km)       │ = 2.24 km × 2.24 km        ║
   ║       │                     │                            ║
   ║       │        ·  centroid  │                            ║
   ║       │       ╱╲            │                            ║
@@ -853,6 +853,28 @@ a profile automatically:
 
 The threshold (default 8 GB) and profile names are configurable in
 `config/monitor.yaml` under `llm.vram_threshold_gb` and `llm.profiles`.
+
+> **Swapping models:** both `high` and `low` accept any Hugging Face model ID.
+> To experiment with a different model, update `llm.profiles.<profile>.model_id`
+> and, if the quantization changes, `llm.profiles.<profile>.load_in_4bit`.
+> Example — replace the `high` profile with Mistral 7B in 4-bit to stay within
+> an 8 GB budget:
+>
+> ```yaml
+> llm:
+>   vram_threshold_gb: 8
+>   profiles:
+>     high:
+>       model_id: "mistralai/Mistral-7B-Instruct-v0.3"
+>       load_in_4bit: true      # was false (fp16) for Phi-3.5-mini
+>     low:
+>       model_id: "Qwen/Qwen2.5-1.5B-Instruct"
+>       load_in_4bit: true
+> ```
+>
+> The new model is downloaded on first use and cached in `data/hf_cache/`
+> (see [doc/03-runtime-stack.md § LLM Explain Step](03-runtime-stack.md#llm-explain-step)).
+> No code changes are needed.
 
 #### Payload built per parcel
 
