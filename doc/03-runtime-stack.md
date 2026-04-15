@@ -313,6 +313,24 @@ downloaded once.
 
 `data/hf_cache/` is listed in `.gitignore` and is never committed.
 
+**What is cached:** only model weights (`.safetensors` shards). The code that
+runs the model is the native `transformers` implementation bundled inside the
+container image. Weights are binary and version-agnostic — they do not need to
+be refreshed when `transformers` is updated or the container is rebuilt.
+
+**When to clear the cache:** only if you want to download a newer release of
+the model itself (e.g. Microsoft ships an improved Phi-3.5-mini checkpoint).
+To force a re-download of a specific model:
+
+```bash
+docker compose exec workspace rm -rf /app/data/hf_cache/models--microsoft--Phi-3.5-mini-instruct
+# or for the low-profile model:
+docker compose exec workspace rm -rf /app/data/hf_cache/models--Qwen--Qwen2.5-1.5B-Instruct
+```
+
+The next explain run downloads the model again automatically. No other steps
+are required.
+
 ---
 
 ## Environment Variables

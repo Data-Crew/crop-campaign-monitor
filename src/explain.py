@@ -234,8 +234,8 @@ def explain(
     profile: dict[str, Any] = {}
     if not use_mock:
         try:
-            profile_name, profile = select_llm_profile(cfg)
-            model, tokenizer = load_model_and_tokenizer(profile)
+            profile_name, profile, best_gpu = select_llm_profile(cfg)
+            model, tokenizer = load_model_and_tokenizer(profile, target_gpu=best_gpu)
         except Exception as e:
             log.warning("LLM load failed (%s); using mock explainer", e)
             use_mock = True

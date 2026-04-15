@@ -12,64 +12,91 @@ from src.gpu import discover_gpus
 log = logging.getLogger(__name__)
 
 
-def select_llm_profile(cfg: dict) -> tuple[str, dict]:
-    """Return (profile_name, profile_dict) for LLM loading."""
+def select_llm_profile(cfg: dict) -> tuple[str, dict, int | None]:
+    """Return (profile_name, profile_dict, best_gpu_index) for LLM loading.
+
+    best_gpu_index is the CUDA index of the GPU with the most total VRAM, or
+    None when CUDA is not available. It is used by load_model_and_tokenizer to
+    target a single device instead of letting accelerate distribute the model
+    across all visible GPUs (which can OOM smaller secondary GPUs).
+    """
     llm_cfg = cfg.get("llm") or {}
     profiles = llm_cfg.get("profiles") or {}
     if not profiles:
         raise ValueError("config llm.profiles is missing or empty")
+
+    gpus = discover_gpus()
+    best_gpu: dict | None = max(gpus, key=lambda g: g["vram_gb"]) if gpus else None
+    best_gpu_index: int | None = best_gpu["index"] if best_gpu else None
+    best_vram = best_gpu["vram_gb"] if best_gpu else 0.0
 
     override = llm_cfg.get("profile_override")
     if override:
         name = str(override)
         if name not in profiles:
             raise ValueError(f"llm.profile_override {name!r} not in llm.profiles")
-        log.info("Using LLM profile override %r", name)
-        return name, profiles[name]
+        log.info("Using LLM profile override %r (target GPU: %s)", name, best_gpu_index)
+        return name, profiles[name], best_gpu_index
 
     threshold = float(llm_cfg.get("vram_threshold_gb", 8))
-    gpus = discover_gpus()
-    best_vram = max((g["vram_gb"] for g in gpus), default=0.0)
-
     profile_name = "high" if best_vram >= threshold else "low"
     if profile_name not in profiles:
         profile_name = "low" if "low" in profiles else next(iter(profiles))
     log.info(
-        "Auto-selected LLM profile %r (best VRAM: %.1f GB, threshold %.1f GB)",
+        "Auto-selected LLM profile %r (best VRAM: %.1f GB on GPU %s, threshold %.1f GB)",
         profile_name,
         best_vram,
+        best_gpu_index,
         threshold,
     )
-    return profile_name, profiles[profile_name]
+    return profile_name, profiles[profile_name], best_gpu_index
 
 
-def load_model_and_tokenizer(profile: dict) -> tuple[Any, Any]:
-    """Load Hugging Face causal LM with dtype / optional 4-bit quantisation."""
+def load_model_and_tokenizer(
+    profile: dict,
+    target_gpu: int | None = None,
+) -> tuple[Any, Any]:
+    """Load Hugging Face causal LM with dtype / optional 4-bit quantisation.
+
+    target_gpu is the CUDA device index to load the model onto. When provided,
+    all model layers are placed on that single device instead of letting
+    accelerate distribute across all visible GPUs (which can OOM smaller GPUs).
+    """
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
     model_id = profile["model_id"]
-    kwargs: dict[str, Any] = {"trust_remote_code": True}
+    # Do not use trust_remote_code: Phi-3.5-mini and Qwen2.5 are both natively
+    # supported by transformers >= 4.40. Using trust_remote_code causes HF to
+    # cache the model's custom Python code (modeling_phi3.py, etc.) in
+    # modules/transformers_modules/, which can become incompatible with newer
+    # transformers versions and is difficult to invalidate.
+    kwargs: dict[str, Any] = {}
 
     use_cuda = torch.cuda.is_available()
     quant = profile.get("quantization")
+
+    # Target a single GPU rather than "auto" to avoid spreading model layers
+    # onto secondary GPUs that may have limited or already-occupied VRAM.
+    device_map: str | dict = f"cuda:{target_gpu}" if (use_cuda and target_gpu is not None) else "auto"
 
     if quant == "4bit" and use_cuda:
         kwargs["quantization_config"] = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.float16,
         )
-        kwargs["device_map"] = "auto"
+        kwargs["device_map"] = device_map
     elif quant == "4bit" and not use_cuda:
         log.warning("4-bit quantisation requires CUDA — loading %s in float16 on CPU", model_id)
-        kwargs["torch_dtype"] = torch.float16
+        kwargs["dtype"] = torch.float16
     elif profile.get("dtype") == "float16":
-        kwargs["torch_dtype"] = torch.float16
-        kwargs["device_map"] = "auto" if use_cuda else None
+        kwargs["dtype"] = torch.float16
+        kwargs["device_map"] = device_map if use_cuda else None
 
-    if not use_cuda and kwargs.get("device_map") == "auto":
+    if not use_cuda and kwargs.get("device_map") is not None:
         kwargs.pop("device_map", None)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    log.info("Loading %s onto %s", model_id, kwargs.get("device_map", "cpu"))
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
     if not use_cuda and kwargs.get("device_map") is None:
         model = model.to("cpu")
