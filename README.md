@@ -12,6 +12,7 @@ field is developing normally or showing anomalies.
 - [doc/01-workflow.md](doc/01-workflow.md) — step-by-step workflow with inputs, outputs, and algorithms
 - [doc/02-architecture.md](doc/02-architecture.md) — Clay Foundation Model internals and fine-tuning deep-dive
 - [doc/03-runtime-stack.md](doc/03-runtime-stack.md) — Docker Compose setup, GPU passthrough, environment variables
+- [doc/llm_explainer.md](doc/llm_explainer.md) — LLM explain step: data flow, prompt design, HF inference, output schema
 
 ## Architecture — Three Phases
 
