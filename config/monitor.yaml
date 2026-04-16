@@ -85,6 +85,12 @@ llm:
   top_p: 0.9
   retry_temperature: 0.35
   skip_if_unchanged: false
+  # Optional Geo-RAG retrieval layer (local evidence only; does not replace scoring).
+  geo_rag:
+    enabled: false
+    k_semantic: 5      # FAISS similar parcels (embedding cosine similarity)
+    k_spatial: 5       # geographic neighbours (haversine on centroids)
+    max_spatial_km: null   # null = no distance cap
 
 # ── Output ──────────────────────────────────────────
 output:

@@ -1,8 +1,34 @@
 # LLM Explainer — Implementation Reference
 
 > Deep-dive into `src/explain.py`, `src/explain_prompts.py`, `src/explain_schema.py`,
-> and `src/llm.py`. For operational details (enabling the step, GPU profiles, cache)
+> `src/retrieve.py`, and `src/llm.py`. For operational details (enabling the step, GPU profiles, cache)
 > see [doc/03-runtime-stack.md § LLM Explain Step](03-runtime-stack.md#llm-explain-step).
+
+---
+
+## Retrieval layer vs generator layer
+
+This pipeline keeps **anomaly detection and traffic-light status** entirely in the
+deterministic scoring step (`src/score.py`). The **generator layer** is the existing
+Hugging Face path in `src/llm.py`: it turns structured text into JSON that matches
+`ParcelExplanation`.
+
+The optional **Geo-RAG retrieval layer** (`src/retrieve.py`) runs **before** generation
+when `llm.geo_rag.enabled: true`. It is a **local** extension: it does not replace
+the explainer, does not classify anomalies, and does not embed new remote knowledge.
+It only gathers evidence from artifacts this repo already produces:
+
+| Retrieval | Mechanism | Question it helps answer |
+|-----------|-----------|-------------------------|
+| **Semantic similarity** | Reuses the Step 8 FAISS index (`src/query.py` → `parcels.faiss` / `parcels_vectors.npz` + metadata) | Which parcels have the most similar seasonal embedding vectors? |
+| **Spatial neighbours** | Haversine distance on parcel centroids (from `parcel_scores.parquet` / geometries) | Which parcels are physically nearby? Is a signal plausibly local vs regional? |
+| **Reference context (optional)** | Summary metadata from `reference_profiles.pkl` (bin count and sample dates — no raw vectors in the prompt) | What temporal bins define the crop reference trajectory? |
+
+Semantic and geographic retrieval are **not** merged into one notion: FAISS answers
+embedding similarity; distance on the globe answers proximity.
+
+If retrieval fails (missing index, errors), the step **degrades** to explainer-only:
+the base parcel payload is still sent; schema validation and fallbacks are unchanged.
 
 ---
 
@@ -28,11 +54,14 @@ Entry points:
 data/output/parcel_scores.parquet
           │
           ▼
-  build_payload()          ← one dict per parcel row
+  build_payload()          ← one dict per parcel row (authoritative analytics)
           │
           ▼
-  USER_PROMPT_TEMPLATE     ← payload serialized as JSON into the user message
-  build_system_prompt()    ← rules + JSON schema + few-shot example
+  [optional] build_retrieved_context()  ← src/retrieve.py: FAISS + spatial + ref summary
+          │
+          ▼
+  build_user_message()     ← explainer-only: flat JSON; Geo-RAG: parcel_analytics + retrieved bundle
+  build_system_prompt()    ← rules + JSON schema + few-shot (+ Geo-RAG addendum when enabled)
           │
           ▼
   tokenizer.apply_chat_template()   ← formats messages into model-native prompt string
@@ -128,7 +157,9 @@ The prompt is a two-message chat conversation: a **system message** and a
 
 ### System prompt (`SYSTEM_PROMPT` + `FEW_SHOT_BLOCK`)
 
-The system prompt has two parts concatenated by `build_system_prompt(include_few_shot=True)`:
+The system prompt has two parts concatenated by `build_system_prompt(include_few_shot=True, geo_rag=...)`.
+When Geo-RAG is enabled in config, an additional block (`GEO_RAG_RULES`) states that traffic-light
+status comes only from parcel analytics and that retrieved evidence is supporting context.
 
 **Part 1 — Rules and JSON schema**
 
@@ -154,9 +185,10 @@ A single complete input/output pair (RED corn parcel) is appended to the system
 message. This shows the model the expected reasoning style and output format
 without consuming user-turn tokens.
 
-### User prompt (`USER_PROMPT_TEMPLATE`)
+### User prompt (`build_user_message` / `USER_PROMPT_TEMPLATE`)
 
-Minimal wrapper — the serialized payload JSON is inserted verbatim:
+**Explainer-only mode** (`llm.geo_rag.enabled: false` or no retrieved content): the
+serialized payload JSON is inserted via `USER_PROMPT_TEMPLATE`:
 
 ```
 Analyze this parcel and produce your JSON explanation:
@@ -164,8 +196,14 @@ Analyze this parcel and produce your JSON explanation:
 {payload_json}
 ```
 
-The user message intentionally contains no instructions; all constraints are in
-the system message.
+**Geo-RAG mode** (`llm.geo_rag.enabled: true` and at least one non-empty retrieval section):
+the user message uses a two-part layout: `parcel_analytics` (the same dict as
+`build_payload`) plus a JSON block for `similar_parcels`, `spatial_neighbors`,
+`reference_context`, and optional `retrieval_notes`. The model must not treat
+retrieved items as new facts not listed there.
+
+The user message intentionally avoids duplicating system rules; constraints remain
+in the system message.
 
 ---
 
@@ -339,7 +377,9 @@ One row per explained parcel. Written to `data/output/parcel_explanations.parque
 | `llm_model` | str | HuggingFace model ID used (or `"mock"`) |
 | `profile` | str | Profile name: `"high"`, `"low"`, or `"mock"` |
 | `generated_at` | str | ISO 8601 UTC timestamp |
-| `payload_hash` | str | SHA-256 of the input payload (for change detection) |
+| `payload_hash` | str | SHA-256 of the **base** parcel payload only (for `skip_if_unchanged`; retrieval does not affect this hash) |
+| `geo_rag_used` | bool | Whether Geo-RAG was enabled for this row |
+| `retrieval_json` | str or null | JSON-serialised retrieval bundle (for debugging; null for mock rows) |
 
 When the step is called for a subset of parcel IDs (e.g. from Streamlit), the
 existing parquet file is read, the relevant rows are replaced, and the merged
@@ -370,6 +410,11 @@ llm:
   top_p: 0.9                  # nucleus sampling probability mass
   retry_temperature: 0.35     # temperature for the single retry on validation failure
   skip_if_unchanged: false    # skip parcels whose payload hash matches stored value
+  geo_rag:
+    enabled: false            # optional local retrieval layer (see § Retrieval layer vs generator layer)
+    k_semantic: 5             # FAISS nearest neighbours (embedding similarity)
+    k_spatial: 5              # geographic neighbours (haversine)
+    max_spatial_km: null      # optional cap; null = no cap
 
   profiles:
     high:

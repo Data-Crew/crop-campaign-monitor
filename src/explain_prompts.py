@@ -1,5 +1,8 @@
 """System and user prompts for parcel LLM explanations."""
 
+import json
+from typing import Any
+
 SYSTEM_PROMPT = """You are an agricultural monitoring assistant that explains crop health
 scores to agronomists. You receive structured data from a satellite-based
 scoring system and produce JSON explanations.
@@ -31,6 +34,25 @@ RULES — you must follow all of these:
 USER_PROMPT_TEMPLATE = """Analyze this parcel and produce your JSON explanation:
 
 {payload_json}
+"""
+
+GEO_RAG_RULES = """
+ADDITIONAL RULES WHEN RETRIEVED CONTEXT IS PRESENT:
+- Traffic-light status (GREEN/YELLOW/RED/GRAY) and health metrics come ONLY from the
+  "parcel_analytics" section. The scoring pipeline already determined the anomaly label.
+- Retrieved geospatial evidence (similar parcels, geographic neighbours, reference profile
+  summary) is supporting context only. Use it to discuss localization, analogues, or
+  regional patterns — not to re-diagnose or override the analytics status.
+- Do not invent parcels, distances, or neighbours that are not listed in retrieved context.
+"""
+
+USER_PROMPT_WITH_RAG_TEMPLATE = """The JSON in "parcel_analytics" is authoritative for this parcel's scores and status.
+
+{analytics_json}
+
+Retrieved geospatial evidence (supporting context only — do not override parcel_analytics status):
+
+{retrieved_json}
 """
 
 FEW_SHOT_BLOCK = """
@@ -71,7 +93,45 @@ EXAMPLE OUTPUT:
 """
 
 
-def build_system_prompt(include_few_shot: bool = True) -> str:
+def build_system_prompt(include_few_shot: bool = True, geo_rag: bool = False) -> str:
+    base = SYSTEM_PROMPT.strip()
+    if geo_rag:
+        base = base + "\n" + GEO_RAG_RULES.strip()
     if include_few_shot:
-        return SYSTEM_PROMPT.strip() + "\n\n" + FEW_SHOT_BLOCK.strip()
-    return SYSTEM_PROMPT.strip()
+        return base + "\n\n" + FEW_SHOT_BLOCK.strip()
+    return base
+
+
+def _retrieved_has_content(retrieved: dict[str, Any]) -> bool:
+    if not retrieved:
+        return False
+    if retrieved.get("similar_parcels"):
+        return True
+    if retrieved.get("spatial_neighbors"):
+        return True
+    ref = retrieved.get("reference_context")
+    if ref is not None and ref != {}:
+        return True
+    return False
+
+
+def build_user_message(
+    base_payload: dict[str, Any],
+    retrieved: dict[str, Any] | None,
+    geo_rag_enabled: bool,
+) -> str:
+    """User turn: parcel analytics JSON, optionally plus retrieved Geo-RAG bundle."""
+    if not geo_rag_enabled or not retrieved or not _retrieved_has_content(retrieved):
+        return USER_PROMPT_TEMPLATE.format(
+            payload_json=json.dumps(base_payload, indent=2, default=str),
+        )
+    analytics = json.dumps({"parcel_analytics": base_payload}, indent=2, default=str)
+    retrieved_trim = {
+        k: v
+        for k, v in retrieved.items()
+        if k != "retrieval_notes" or (v and len(v) > 0)
+    }
+    return USER_PROMPT_WITH_RAG_TEMPLATE.format(
+        analytics_json=analytics,
+        retrieved_json=json.dumps(retrieved_trim, indent=2, default=str),
+    )

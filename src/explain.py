@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import pickle
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 from src.config import get_config
-from src.explain_prompts import USER_PROMPT_TEMPLATE, build_system_prompt
+from src.explain_prompts import build_system_prompt, build_user_message
 from src.explain_schema import (
     Confidence,
     ConsistencyCheck,
@@ -180,10 +181,10 @@ def _run_llm_once(
     system_prompt: str,
     payload: dict[str, Any],
     temperature: float,
+    geo_rag_enabled: bool = False,
+    retrieved: dict[str, Any] | None = None,
 ) -> str:
-    user_text = USER_PROMPT_TEMPLATE.format(
-        payload_json=json.dumps(payload, indent=2, default=str),
-    )
+    user_text = build_user_message(payload, retrieved, geo_rag_enabled)
     return generate_json_response(
         model,
         tokenizer,
@@ -212,6 +213,7 @@ def explain(
         raise FileNotFoundError(f"Scores not found: {scores_path} — run score step first")
 
     scored = gpd.read_parquet(scores_path)
+    scored_all = scored
     if parcel_ids:
         pids = {str(p) for p in parcel_ids}
         scored = scored[scored["parcel_id"].astype(str).isin(pids)]
@@ -240,7 +242,25 @@ def explain(
             log.warning("LLM load failed (%s); using mock explainer", e)
             use_mock = True
 
-    system_prompt = build_system_prompt(include_few_shot=True)
+    geo_rag_on = bool((llm_cfg.get("geo_rag") or {}).get("enabled", False))
+    rag_index: Any = None
+    rag_profiles: Any = None
+    if geo_rag_on and not use_mock:
+        try:
+            from src.query import load_parcel_index
+
+            rag_index = load_parcel_index(cfg=cfg)
+        except Exception as e:
+            log.warning("Geo-RAG: similarity index unavailable (%s); semantic neighbours disabled", e)
+        prof_path = output_dir / "reference_profiles.pkl"
+        if prof_path.exists():
+            try:
+                with open(prof_path, "rb") as f:
+                    rag_profiles = pickle.load(f)
+            except (OSError, pickle.PickleError) as e:
+                log.warning("Geo-RAG: could not load reference_profiles.pkl (%s)", e)
+
+    system_prompt = build_system_prompt(include_few_shot=True, geo_rag=geo_rag_on)
 
     rows: list[dict[str, Any]] = []
     n_fail = 0
@@ -259,6 +279,28 @@ def explain(
 
         exp: ParcelExplanation
 
+        retrieved: dict[str, Any] | None = None
+        if geo_rag_on and not use_mock:
+            try:
+                from src.retrieve import build_retrieved_context
+
+                retrieved = build_retrieved_context(
+                    pid,
+                    row,
+                    scored_all,
+                    cfg,
+                    parcel_index=rag_index,
+                    profiles_cache=rag_profiles,
+                )
+            except Exception as e:
+                log.warning("Geo-RAG retrieval failed for %s (%s); continuing without enrichment", pid, e)
+                retrieved = {
+                    "similar_parcels": [],
+                    "spatial_neighbors": [],
+                    "reference_context": None,
+                    "retrieval_notes": [f"build_error:{type(e).__name__}"],
+                }
+
         if use_mock:
             raw_out = _mock_explanation_json(payload)
             js = extract_json_object(raw_out) or raw_out
@@ -274,6 +316,8 @@ def explain(
                     "profile": "mock",
                     "generated_at": datetime.now(timezone.utc).isoformat(),
                     "payload_hash": phash,
+                    "geo_rag_used": False,
+                    "retrieval_json": None,
                 }
             )
             continue
@@ -281,7 +325,15 @@ def explain(
         assert model is not None and tokenizer is not None
         t0 = float(llm_cfg.get("temperature", 0.1))
         raw_text = _run_llm_once(
-            model, tokenizer, profile, llm_cfg, system_prompt, payload, t0,
+            model,
+            tokenizer,
+            profile,
+            llm_cfg,
+            system_prompt,
+            payload,
+            t0,
+            geo_rag_enabled=geo_rag_on,
+            retrieved=retrieved,
         )
         js = extract_json_object(raw_text)
         validated = validate_explanation(js or "", pst) if js else None
@@ -289,7 +341,15 @@ def explain(
             t1 = float(llm_cfg.get("retry_temperature", 0.35))
             log.info("Retrying LLM with temperature %.2f for parcel %s", t1, pid)
             raw_text = _run_llm_once(
-                model, tokenizer, profile, llm_cfg, system_prompt, payload, t1,
+                model,
+                tokenizer,
+                profile,
+                llm_cfg,
+                system_prompt,
+                payload,
+                t1,
+                geo_rag_enabled=geo_rag_on,
+                retrieved=retrieved,
             )
             js = extract_json_object(raw_text)
             validated = validate_explanation(js or "", pst) if js else None
@@ -299,6 +359,7 @@ def explain(
         else:
             exp = validated
 
+        rj = json.dumps(retrieved, default=str) if retrieved is not None else None
         rows.append(
             {
                 "parcel_id": pid,
@@ -309,6 +370,8 @@ def explain(
                 "profile": profile_name,
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "payload_hash": phash,
+                "geo_rag_used": bool(geo_rag_on and retrieved is not None),
+                "retrieval_json": rj,
             }
         )
 

@@ -1074,14 +1074,25 @@ def tab_parcel_detail(ctx: dict[str, Any]) -> None:
         key="parcel_llm_quality",
         help="Sets llm.profile_override when using Regenerate (except auto).",
     )
+    geo_rag_on = st.checkbox(
+        "Geo-RAG",
+        value=False,
+        key="parcel_llm_geo_rag",
+        help=(
+            "Optional retrieval layer: enriches the LLM prompt with local context from this campaign "
+            "(FAISS similar parcels, geographic neighbours, optional reference-profile summary). "
+            "Does not change scoring. Overrides llm.geo_rag.enabled in config for this run only."
+        ),
+    )
     prof_suffix = ""
     if q_mode == "high":
         prof_suffix = " llm.profile_override=high"
     elif q_mode == "low":
         prof_suffix = " llm.profile_override=low"
+    rag_suffix = " llm.geo_rag.enabled=true" if geo_rag_on else " llm.geo_rag.enabled=false"
     regen_cmd = (
         f"{gpu_e} {sys.executable} -m src.explain --config config/monitor.yaml "
-        f"{ov} llm.enabled=true{prof_suffix} --parcel-id {shlex.quote(str(selected_pid))}"
+        f"{ov} llm.enabled=true{prof_suffix}{rag_suffix} --parcel-id {shlex.quote(str(selected_pid))}"
     )
     if st.button("Regenerate explanation for this parcel", key="parcel_llm_regen"):
         _run_script(regen_cmd, step_name="Monitor \u2192 Explain (one parcel)")

@@ -824,6 +824,17 @@ reason about crop health in JSON format.
 This step is **entirely optional** and **read-only**: it does not modify any
 pipeline output, only appends `parcel_explanations.parquet`.
 
+**Geo-RAG retrieval layer (optional):** when `llm.geo_rag.enabled: true`, the
+explain step runs [`src/retrieve.py`](../src/retrieve.py) after `build_payload()`
+and before the LLM call. This **retrieval layer** adds local **retrieved geospatial
+evidence** to the user message: (1) **semantic** nearest parcels via the existing
+FAISS index from Step 8 (`parcels.faiss` / `src/query.py`), (2) **spatial**
+neighbours by geographic distance (not FAISS), and (3) an optional summary of the
+crop reference profile from `reference_profiles.pkl`. The **generator layer**
+(`src/llm.py`) is unchanged; scoring and traffic-light status remain fully determined
+upstream. If retrieval fails or artifacts are missing, the step falls back to
+explainer-only behaviour. Details: [doc/llm_explainer.md](llm_explainer.md).
+
 **Enabling the step:**
 
 ```yaml

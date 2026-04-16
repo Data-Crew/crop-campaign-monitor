@@ -253,6 +253,11 @@ structure — is documented in
 This section covers the operational aspects: how the step is activated, how the
 model is chosen automatically, and how the model cache works.
 
+**Geo-RAG (optional):** `llm.geo_rag.enabled` adds a local retrieval pass before
+the LLM (FAISS similar parcels, geographic neighbours, optional reference-profile
+summary). It does not replace scoring or the generator; see
+[doc/llm_explainer.md — Retrieval layer vs generator layer](llm_explainer.md#retrieval-layer-vs-generator-layer).
+
 ### Default state
 
 The step is **disabled by default**: `llm.enabled: false` in
@@ -263,14 +268,16 @@ The step is **disabled by default**: `llm.enabled: false` in
 
 The dashboard button in the **Parcel Details** tab bypasses the `llm.enabled`
 config flag entirely. It runs the explain script directly for the selected
-parcel with the flag forced on:
+parcel with the flag forced on. The **Geo-RAG** checkbox adds
+`llm.geo_rag.enabled=true` or `llm.geo_rag.enabled=false` for that run only
+(overrides `config/monitor.yaml`):
 
 ```bash
-python -m src.explain --config config/monitor.yaml llm.enabled=true --parcel-id <id>
+python -m src.explain --config config/monitor.yaml llm.enabled=true llm.geo_rag.enabled=false --parcel-id <id>
 ```
 
 This activates the LLM for that single parcel on demand, with no change to
-`config/monitor.yaml`.
+`config/monitor.yaml` on disk.
 
 ### Automatic profile selection by VRAM
 

@@ -85,6 +85,11 @@ llm:
   top_p: 0.9
   retry_temperature: 0.35
   skip_if_unchanged: false
+  geo_rag:
+    enabled: false
+    k_semantic: 5
+    k_spatial: 5
+    max_spatial_km: null
 
 # ── Output ──────────────────────────────────────────
 output:

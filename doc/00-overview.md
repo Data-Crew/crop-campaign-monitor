@@ -16,7 +16,11 @@ infrastructure (config, GPU management, chip extraction, and field ingestion):
 
 3. **Phase 3 — Monitor** (`src/embed.py` … `src/report.py`): Uses the encoder
    to embed Sentinel-2 chips, builds per-crop reference profiles, and scores
-   each parcel against its expected trajectory.
+   each parcel against its expected trajectory. An optional **LLM explainer**
+   step (`src/explain.py`) can generate JSON narratives; an optional **Geo-RAG
+   retrieval layer** (`src/retrieve.py`) may enrich those prompts with local
+   FAISS and geographic context without moving anomaly detection into the LLM
+   (see [doc/llm_explainer.md](llm_explainer.md)).
 
 For step-by-step execution details see [01-workflow.md](01-workflow.md).
 For Docker and GPU setup see [doc/03-runtime-stack.md](03-runtime-stack.md).

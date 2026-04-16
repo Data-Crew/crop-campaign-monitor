@@ -6,13 +6,17 @@ across a growing season. It processes Sentinel-2 satellite imagery through the
 per-parcel traffic-light scores (GREEN / YELLOW / RED) indicating whether each
 field is developing normally or showing anomalies.
 
+![Crop Campaign Monitor — Streamlit dashboard (Campaign Overview)](doc/images/dashboard-campaign-overview.png)
+
+*The Streamlit **Outputs** → **Campaign Overview** view: summary metrics, GPU selection in the sidebar, and parcel polygons on the map colored by score (GREEN / YELLOW / RED). Gray parcels lack embeddings for the current campaign.*
+
 ## Documentation Map
 
 - [doc/00-overview.md](doc/00-overview.md) — phase architecture, pipeline tables, and phase dependency rules
 - [doc/01-workflow.md](doc/01-workflow.md) — step-by-step workflow with inputs, outputs, and algorithms
 - [doc/02-architecture.md](doc/02-architecture.md) — Clay Foundation Model internals and fine-tuning deep-dive
 - [doc/03-runtime-stack.md](doc/03-runtime-stack.md) — Docker Compose setup, GPU passthrough, environment variables
-- [doc/llm_explainer.md](doc/llm_explainer.md) — LLM explain step: data flow, prompt design, HF inference, output schema
+- [doc/llm_explainer.md](doc/llm_explainer.md) — LLM explain step: data flow, prompt design, HF inference, optional Geo-RAG retrieval layer, output schema
 
 ## Architecture — Three Phases
 
@@ -287,3 +291,7 @@ Streamlit sidebar.
   button activates it on demand for a single parcel without modifying the
   config. Which model loads depends on the available GPU VRAM at that moment —
   see [doc/03-runtime-stack.md § LLM Explain Step](doc/03-runtime-stack.md#llm-explain-step).
+- **Geo-RAG retrieval is optional** (`llm.geo_rag.enabled: false` by default). When
+  enabled, the explain step enriches the generator with local retrieved context
+  (FAISS similar parcels, geographic neighbours, optional reference-profile summary)
+  without changing how anomalies are scored. See [doc/llm_explainer.md](doc/llm_explainer.md).
