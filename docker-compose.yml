@@ -11,7 +11,6 @@ x-gpu-config: &gpu-config
     - MAPBOX_API_ACCESS_TOKEN=${MAPBOX_API_ACCESS_TOKEN:-pk.eyJ1IjoidWNmLW1hcGJveCIsImEiOiJja3RpeXhkaXcxNzJtMnZxbmtkcnJuM3BkIn0.kGmGlkbuWaCBf7_RrZXULg}
     - NVIDIA_VISIBLE_DEVICES=all
     - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    - LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
     # Persist HuggingFace model cache across container recreations.
     # Models are stored in data/hf_cache/ on the host (bind-mounted via ./data).
     - HF_HOME=/app/data/hf_cache
@@ -22,29 +21,13 @@ x-gpu-config: &gpu-config
     - ./train:/app/train
     - ./app:/app/app
     - ./scripts:/app/scripts
-    # Host NVIDIA libraries — manual GPU passthrough (default supported approach).
-    # Paths assume x86_64 Linux with NVIDIA drivers installed on the host.
-    - /usr/lib/x86_64-linux-gnu/libcuda.so.1:/usr/lib/x86_64-linux-gnu/libcuda.so.1:ro
-    - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
-    - /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.1:ro
-    - /usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:/usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.4:ro
-  devices:
-    # GPU device nodes for this machine:
-    #   nvidia0 = RTX 500 Ada Generation (integrated, always present)    ~4 GB VRAM
-    #   nvidia1 = GeForce RTX 4070 (eGPU, external)                     ~12 GB VRAM
-    #
-    # When disconnecting the eGPU:
-    #   1. Comment out /dev/nvidia1 below
-    #   2. docker compose down && docker compose up -d
-    # When reconnecting the eGPU: uncomment /dev/nvidia1 and recreate.
-    #
-    # Note: the active GPU topology also affects the LLM explain step —
-    # see doc/03-runtime-stack.md § LLM Explain Step.
-    - /dev/nvidia0:/dev/nvidia0
-    - /dev/nvidia1:/dev/nvidia1   # eGPU — comment out when disconnected
-    - /dev/nvidiactl:/dev/nvidiactl
-    - /dev/nvidia-uvm:/dev/nvidia-uvm
-    - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
 
 services:
 
@@ -99,20 +82,3 @@ services:
     # Full pipeline — all three phases in sequence (Phase 1 → 2 → 3)
     # Usage: docker compose run --rm pipeline
     entrypoint: ["bash", "scripts/run_pipeline.sh"]
-
-  # ── Optional advanced alternative: NVIDIA Container Toolkit ────────────────
-  # If nvidia-container-toolkit is installed on the host, you can replace the
-  # manual `devices` and NVIDIA library `volumes` in x-gpu-config with a
-  # `deploy` block. This is an optional alternative — it is NOT required for
-  # the default supported setup and is NOT validated against this repository.
-  #
-  # To use it, remove the `devices` and NVIDIA lib entries from x-gpu-config,
-  # and add the following under the relevant service(s):
-  #
-  # deploy:
-  #   resources:
-  #     reservations:
-  #       devices:
-  #         - driver: nvidia
-  #           count: all
-  #           capabilities: [gpu]
